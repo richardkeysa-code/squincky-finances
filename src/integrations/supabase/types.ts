@@ -73,7 +73,7 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
-      today_conversion_count: { Args: { _user_id: string }; Returns: number }
+      [_ in never]: never
     }
     Enums: {
       [_ in never]: never
