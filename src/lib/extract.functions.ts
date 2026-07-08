@@ -68,17 +68,15 @@ export const extractDocument = createServerFn({ method: "POST" })
     const gateway = createLovableAiGateway(apiKey);
     const model = gateway("google/gemini-2.5-flash");
 
-    const content = SUPPORTED_IMAGE.has(mime)
+    const dataUrl = `data:${mime};base64,${data.dataBase64}`;
+    const userContent = SUPPORTED_IMAGE.has(mime)
       ? [
-          { type: "text" as const, text: "Extract every transaction from this document." },
-          { type: "image_url" as const, image_url: { url: `data:${mime};base64,${data.dataBase64}` } },
+          { type: "text" as const, text: "Extract every transaction from this document as JSON." },
+          { type: "image" as const, image: dataUrl },
         ]
       : [
-          { type: "text" as const, text: "Extract every transaction from this document." },
-          {
-            type: "file" as const,
-            file: { filename: data.fileName, file_data: `data:${mime};base64,${data.dataBase64}` },
-          },
+          { type: "text" as const, text: "Extract every transaction from this document as JSON." },
+          { type: "file" as const, data: dataUrl, mediaType: mime },
         ];
 
     let result;
@@ -87,8 +85,7 @@ export const extractDocument = createServerFn({ method: "POST" })
         model,
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
-          // AI SDK accepts a raw content array for OpenAI-compatible providers.
-          { role: "user", content: content as unknown as string },
+          { role: "user", content: userContent },
         ],
         providerOptions: {
           lovable: { response_format: { type: "json_object" } },
