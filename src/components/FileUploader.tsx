@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { useDropzone } from "react-dropzone";
+import { useDropzone, type FileRejection } from "react-dropzone";
 import { useServerFn } from "@tanstack/react-start";
 import { FileUp, FileText, Image as ImageIcon, X, Download, Loader2, AlertCircle, CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
@@ -129,7 +129,7 @@ export function FileUploader() {
   );
 
   const onDrop = useCallback(
-    (accepted: File[], rejected: { file: File; errors: { code: string; message: string }[] }[]) => {
+    (accepted: File[], rejected: FileRejection[]) => {
       if (rejected.length > 0) {
         const first = rejected[0];
         const err = first.errors[0];
