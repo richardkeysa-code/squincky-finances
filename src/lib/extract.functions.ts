@@ -83,10 +83,8 @@ export const extractDocument = createServerFn({ method: "POST" })
     try {
       result = await generateText({
         model,
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: userContent },
-        ],
+        system: SYSTEM_PROMPT,
+        messages: [{ role: "user", content: userContent }],
         providerOptions: {
           lovable: { response_format: { type: "json_object" } },
         },
