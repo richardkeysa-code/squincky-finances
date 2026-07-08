@@ -1,0 +1,9 @@
+# Squincky
+
+> AI financial document assistant that turns invoices, receipts, and bank statements into clean, structured Excel or CSV data.
+
+Squincky is a drag-and-drop web tool for founders, freelancers, and finance teams. Upload any invoice, receipt, or bank statement (PDF or image) and get back a spreadsheet with date, amount, merchant, category, and description for every transaction.
+
+## Pages
+- [Home / Uploader](/): Drag and drop an invoice, receipt, or bank statement to convert it into Excel or CSV.
+- [Sign in](/auth): Create an account or sign in to save conversion history and manage subscription.
