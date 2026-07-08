@@ -22,7 +22,16 @@ const ACCEPTED = {
 
 const MAX_MB = 25;
 
-type Status = "idle" | "reading" | "processing" | "done" | "error";
+type ItemStatus = "queued" | "reading" | "processing" | "done" | "error";
+
+type Item = {
+  id: string;
+  file: File;
+  status: ItemStatus;
+  progress: number;
+  result: ExtractResult | null;
+  error: string | null;
+};
 
 async function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -36,93 +45,102 @@ async function fileToBase64(file: File): Promise<string> {
   });
 }
 
+function baseName(name: string) {
+  return name.replace(/\.[^.]+$/, "");
+}
+
 export function FileUploader() {
   const { user } = useAuth();
   const extract = useServerFn(extractDocument);
-  const [file, setFile] = useState<File | null>(null);
-  const [status, setStatus] = useState<Status>("idle");
-  const [progress, setProgress] = useState(0);
-  const [result, setResult] = useState<ExtractResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [items, setItems] = useState<Item[]>([]);
   const [paywallOpen, setPaywallOpen] = useState(false);
 
-  const reset = () => {
-    setFile(null);
-    setStatus("idle");
-    setProgress(0);
-    setResult(null);
-    setError(null);
+  const updateItem = (id: string, patch: Partial<Item>) => {
+    setItems((prev) => prev.map((it) => (it.id === id ? { ...it, ...patch } : it)));
   };
 
-  const runQuotaCheck = async (): Promise<boolean> => {
+  const removeItem = (id: string) => setItems((prev) => prev.filter((it) => it.id !== id));
+  const reset = () => setItems([]);
+
+  const checkQuotaFor = async (count: number): Promise<number> => {
+    // Returns how many of `count` we can process. Opens paywall if any are blocked.
     if (user) {
       const u = await getUserUsage(user.id);
-      if (u.subscribed) return true;
-      const total = u.count;
+      if (u.subscribed) return count;
       const limit = DAILY_FREE_LIMIT + u.extraCredits;
-      if (total >= limit) {
-        setPaywallOpen(true);
-        return false;
-      }
-    } else {
-      const u = getAnonUsage();
-      if (u.count >= DAILY_FREE_LIMIT) {
-        setPaywallOpen(true);
-        return false;
-      }
+      const remaining = Math.max(0, limit - u.count);
+      if (remaining < count) setPaywallOpen(true);
+      return Math.min(count, remaining);
     }
-    return true;
+    const u = getAnonUsage();
+    const remaining = Math.max(0, DAILY_FREE_LIMIT - u.count);
+    if (remaining < count) setPaywallOpen(true);
+    return Math.min(count, remaining);
   };
 
-  const handleProcess = useCallback(
-    async (f: File) => {
-      setFile(f);
-      setResult(null);
-      setError(null);
+  const processItem = async (item: Item) => {
+    try {
+      updateItem(item.id, { status: "reading", progress: 15 });
+      const base64 = await fileToBase64(item.file);
+      updateItem(item.id, { status: "processing", progress: 40 });
 
-      if (!(await runQuotaCheck())) {
-        setFile(null);
-        return;
+      let p = 40;
+      const timer = setInterval(() => {
+        p = Math.min(90, p + 3);
+        updateItem(item.id, { progress: p });
+      }, 400);
+
+      const res = await extract({
+        data: {
+          fileName: item.file.name,
+          mimeType: item.file.type || "application/octet-stream",
+          dataBase64: base64,
+        },
+      });
+      clearInterval(timer);
+      updateItem(item.id, { status: "done", progress: 100, result: res });
+
+      if (user) {
+        await recordConversion(user.id, item.file.name, res.transactions.length);
+      } else {
+        bumpAnonUsage();
       }
 
-      try {
-        setStatus("reading");
-        setProgress(15);
-        const base64 = await fileToBase64(f);
-        setProgress(40);
-        setStatus("processing");
+      if (res.transactions.length === 0) {
+        toast.warning(`${item.file.name}: no transactions found.`);
+      } else {
+        toast.success(`${item.file.name}: extracted ${res.transactions.length} transaction${res.transactions.length === 1 ? "" : "s"}.`);
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Something went wrong.";
+      updateItem(item.id, { status: "error", error: msg });
+      toast.error(`${item.file.name}: ${msg}`);
+    }
+  };
 
-        // Fake incremental progress while the model runs
-        let p = 40;
-        const timer = setInterval(() => {
-          p = Math.min(90, p + 3);
-          setProgress(p);
-        }, 400);
+  const handleFiles = useCallback(
+    async (files: File[]) => {
+      if (files.length === 0) return;
+      const allowed = await checkQuotaFor(files.length);
+      if (allowed === 0) return;
+      const toProcess = files.slice(0, allowed);
+      if (allowed < files.length) {
+        toast.warning(`Only ${allowed} of ${files.length} file${files.length === 1 ? "" : "s"} fit in your remaining quota.`);
+      }
 
-        const res = await extract({
-          data: { fileName: f.name, mimeType: f.type || "application/octet-stream", dataBase64: base64 },
-        });
-        clearInterval(timer);
-        setProgress(100);
-        setResult(res);
-        setStatus("done");
+      const newItems: Item[] = toProcess.map((f) => ({
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        file: f,
+        status: "queued",
+        progress: 0,
+        result: null,
+        error: null,
+      }));
+      setItems((prev) => [...prev, ...newItems]);
 
-        if (user) {
-          await recordConversion(user.id, f.name, res.transactions.length);
-        } else {
-          bumpAnonUsage();
-        }
-
-        if (res.transactions.length === 0) {
-          toast.warning("No transactions found in this document.");
-        } else {
-          toast.success(`Extracted ${res.transactions.length} transaction${res.transactions.length === 1 ? "" : "s"}.`);
-        }
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : "Something went wrong.";
-        setError(msg);
-        setStatus("error");
-        toast.error(msg);
+      // Process sequentially to avoid hammering the AI gateway and quota races.
+      for (const it of newItems) {
+        await processItem(it);
       }
     },
     [extract, user],
@@ -135,33 +153,32 @@ export function FileUploader() {
         const err = first.errors[0];
         toast.error(
           err.code === "file-invalid-type"
-            ? "Unsupported file type. Please upload a PDF or image (JPG, PNG, HEIC, WEBP)."
+            ? "Unsupported file type. Please upload PDFs or images (JPG, PNG, HEIC, WEBP)."
             : err.code === "file-too-large"
               ? `File too large. Maximum ${MAX_MB} MB.`
               : err.message,
         );
-        return;
       }
-      const f = accepted[0];
-      if (f) void handleProcess(f);
+      if (accepted.length > 0) void handleFiles(accepted);
     },
-    [handleProcess],
+    [handleFiles],
   );
 
   const { getRootProps, getInputProps, isDragActive, open } = useDropzone({
     onDrop,
     accept: ACCEPTED,
-    maxFiles: 1,
+    multiple: true,
     maxSize: MAX_MB * 1024 * 1024,
     noClick: true,
     noKeyboard: true,
   });
 
-  const busy = status === "reading" || status === "processing";
+  const anyBusy = items.some((it) => it.status === "reading" || it.status === "processing" || it.status === "queued");
+  const allDone = items.length > 0 && items.every((it) => it.status === "done" || it.status === "error");
 
   return (
     <div className="w-full">
-      {status === "idle" || status === "error" ? (
+      {items.length === 0 ? (
         <div
           {...getRootProps()}
           className={`group relative flex flex-col items-center justify-center rounded-3xl border-2 border-dashed p-10 text-center transition-all sm:p-16 ${
@@ -175,10 +192,10 @@ export function FileUploader() {
             <FileUp className="h-8 w-8 text-primary-foreground" />
           </div>
           <h2 className="text-xl font-bold text-foreground sm:text-2xl">
-            {isDragActive ? "Drop your file here" : "Drag & drop your file"}
+            {isDragActive ? "Drop your files here" : "Drag & drop your files"}
           </h2>
           <p className="mt-2 max-w-sm text-sm text-muted-foreground">
-            Invoices, receipts, or bank statements. We'll turn them into a clean Excel sheet.
+            Invoices, receipts, or bank statements — one or many. We'll turn them into clean Excel.
           </p>
           <Button
             type="button"
@@ -186,118 +203,150 @@ export function FileUploader() {
             size="lg"
             className="mt-6 bg-gradient-brand text-primary-foreground shadow-soft hover:opacity-95"
           >
-            Choose file
+            Choose files
           </Button>
           <p className="mt-4 text-xs text-muted-foreground">
-            PDF, JPG, PNG, WEBP, HEIC · up to {MAX_MB} MB
+            PDF, JPG, PNG, WEBP, HEIC · up to {MAX_MB} MB each
           </p>
-          {error && (
-            <div className="mt-6 flex items-center gap-2 rounded-lg border border-destructive/40 bg-destructive/5 px-4 py-2 text-sm text-destructive">
-              <AlertCircle className="h-4 w-4" />
-              {error}
-            </div>
-          )}
         </div>
       ) : (
-        <div className="rounded-3xl border border-border bg-card p-6 shadow-soft sm:p-8">
-          <div className="flex items-start gap-4">
-            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
-              {file?.type.startsWith("image/") ? <ImageIcon className="h-6 w-6" /> : <FileText className="h-6 w-6" />}
+        <div className="space-y-4">
+          {items.map((item) => (
+            <ItemCard key={item.id} item={item} onRemove={() => removeItem(item.id)} />
+          ))}
+
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div
+              {...getRootProps()}
+              className={`flex flex-1 cursor-pointer items-center justify-center gap-2 rounded-xl border-2 border-dashed p-4 text-sm transition-all ${
+                isDragActive ? "border-primary bg-primary/5" : "border-border bg-card hover:border-primary/50"
+              }`}
+              onClick={open}
+            >
+              <input {...getInputProps()} />
+              <FileUp className="h-4 w-4 text-primary" />
+              <span className="font-medium text-foreground">Add more files</span>
             </div>
-            <div className="min-w-0 flex-1">
-              <p className="truncate font-semibold text-foreground">{file?.name}</p>
-              <p className="text-xs text-muted-foreground">
-                {file ? `${(file.size / 1024).toFixed(0)} KB` : ""}
-              </p>
-            </div>
-            {status === "done" && (
-              <Button variant="ghost" size="icon" onClick={reset} aria-label="Clear">
-                <X className="h-4 w-4" />
+            {allDone && (
+              <Button variant="ghost" onClick={reset} disabled={anyBusy}>
+                Clear all
               </Button>
             )}
           </div>
-
-          {busy && (
-            <div className="mt-6">
-              <div className="mb-2 flex items-center gap-2 text-sm text-muted-foreground">
-                <Loader2 className="h-4 w-4 animate-spin text-primary" />
-                <span>{status === "reading" ? "Reading file…" : "Extracting transactions with AI…"}</span>
-              </div>
-              <Progress value={progress} className="h-2" />
-            </div>
-          )}
-
-          {status === "done" && result && (
-            <div className="mt-6">
-              <div className="mb-4 flex items-center gap-2 rounded-lg border border-success/40 bg-success/10 px-3 py-2 text-sm text-success">
-                <CheckCircle2 className="h-4 w-4" />
-                <span>
-                  Extracted <strong>{result.transactions.length}</strong>{" "}
-                  transaction{result.transactions.length === 1 ? "" : "s"} · {result.currency}
-                </span>
-              </div>
-
-              {result.transactions.length > 0 && (
-                <div className="mb-5 max-h-64 overflow-auto rounded-xl border border-border">
-                  <table className="w-full text-left text-sm">
-                    <thead className="sticky top-0 bg-muted text-xs uppercase tracking-wide text-muted-foreground">
-                      <tr>
-                        <th className="px-3 py-2">Date</th>
-                        <th className="px-3 py-2">Merchant</th>
-                        <th className="px-3 py-2">Category</th>
-                        <th className="px-3 py-2 text-right">Amount</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {result.transactions.slice(0, 50).map((t, i) => (
-                        <tr key={i} className="border-t border-border/60">
-                          <td className="whitespace-nowrap px-3 py-2 text-muted-foreground">{t.date}</td>
-                          <td className="px-3 py-2 font-medium">{t.merchant || "—"}</td>
-                          <td className="px-3 py-2 text-muted-foreground">{t.category}</td>
-                          <td className={`whitespace-nowrap px-3 py-2 text-right font-mono ${t.type === "credit" ? "text-success" : "text-foreground"}`}>
-                            {t.type === "credit" ? "+" : "−"}
-                            {t.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  {result.transactions.length > 50 && (
-                    <div className="border-t border-border bg-muted/50 px-3 py-2 text-center text-xs text-muted-foreground">
-                      Showing first 50 rows — download for the full list.
-                    </div>
-                  )}
-                </div>
-              )}
-
-              <div className="flex flex-col gap-3 sm:flex-row">
-                <Button
-                  size="lg"
-                  className="flex-1 bg-gradient-brand text-primary-foreground hover:opacity-95"
-                  onClick={() => downloadXlsx(result, (file?.name ?? "transactions").replace(/\.[^.]+$/, ""))}
-                  disabled={result.transactions.length === 0}
-                >
-                  <Download className="mr-2 h-4 w-4" /> Download Excel
-                </Button>
-                <Button
-                  size="lg"
-                  variant="outline"
-                  className="flex-1"
-                  onClick={() => downloadCsv(result, (file?.name ?? "transactions").replace(/\.[^.]+$/, ""))}
-                  disabled={result.transactions.length === 0}
-                >
-                  <Download className="mr-2 h-4 w-4" /> Download CSV
-                </Button>
-                <Button size="lg" variant="ghost" onClick={reset}>
-                  Convert another
-                </Button>
-              </div>
-            </div>
-          )}
         </div>
       )}
 
       <PaywallDialog open={paywallOpen} onOpenChange={setPaywallOpen} isSignedIn={!!user} />
+    </div>
+  );
+}
+
+function ItemCard({ item, onRemove }: { item: Item; onRemove: () => void }) {
+  const busy = item.status === "reading" || item.status === "processing" || item.status === "queued";
+  return (
+    <div className="rounded-3xl border border-border bg-card p-6 shadow-soft sm:p-8">
+      <div className="flex items-start gap-4">
+        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
+          {item.file.type.startsWith("image/") ? <ImageIcon className="h-6 w-6" /> : <FileText className="h-6 w-6" />}
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="truncate font-semibold text-foreground">{item.file.name}</p>
+          <p className="text-xs text-muted-foreground">{(item.file.size / 1024).toFixed(0)} KB</p>
+        </div>
+        {!busy && (
+          <Button variant="ghost" size="icon" onClick={onRemove} aria-label="Remove">
+            <X className="h-4 w-4" />
+          </Button>
+        )}
+      </div>
+
+      {busy && (
+        <div className="mt-6">
+          <div className="mb-2 flex items-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin text-primary" />
+            <span>
+              {item.status === "queued"
+                ? "Queued…"
+                : item.status === "reading"
+                  ? "Reading file…"
+                  : "Extracting transactions with AI…"}
+            </span>
+          </div>
+          <Progress value={item.progress} className="h-2" />
+        </div>
+      )}
+
+      {item.status === "error" && item.error && (
+        <div className="mt-6 flex items-center gap-2 rounded-lg border border-destructive/40 bg-destructive/5 px-4 py-2 text-sm text-destructive">
+          <AlertCircle className="h-4 w-4" />
+          {item.error}
+        </div>
+      )}
+
+      {item.status === "done" && item.result && (
+        <div className="mt-6">
+          <div className="mb-4 flex items-center gap-2 rounded-lg border border-success/40 bg-success/10 px-3 py-2 text-sm text-success">
+            <CheckCircle2 className="h-4 w-4" />
+            <span>
+              Extracted <strong>{item.result.transactions.length}</strong>{" "}
+              transaction{item.result.transactions.length === 1 ? "" : "s"} · {item.result.currency}
+            </span>
+          </div>
+
+          {item.result.transactions.length > 0 && (
+            <div className="mb-5 max-h-64 overflow-auto rounded-xl border border-border">
+              <table className="w-full text-left text-sm">
+                <thead className="sticky top-0 bg-muted text-xs uppercase tracking-wide text-muted-foreground">
+                  <tr>
+                    <th className="px-3 py-2">Date</th>
+                    <th className="px-3 py-2">Merchant</th>
+                    <th className="px-3 py-2">Category</th>
+                    <th className="px-3 py-2 text-right">Amount</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {item.result.transactions.slice(0, 50).map((t, i) => (
+                    <tr key={i} className="border-t border-border/60">
+                      <td className="whitespace-nowrap px-3 py-2 text-muted-foreground">{t.date}</td>
+                      <td className="px-3 py-2 font-medium">{t.merchant || "—"}</td>
+                      <td className="px-3 py-2 text-muted-foreground">{t.category}</td>
+                      <td className={`whitespace-nowrap px-3 py-2 text-right font-mono ${t.type === "credit" ? "text-success" : "text-foreground"}`}>
+                        {t.type === "credit" ? "+" : "−"}
+                        {t.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {item.result.transactions.length > 50 && (
+                <div className="border-t border-border bg-muted/50 px-3 py-2 text-center text-xs text-muted-foreground">
+                  Showing first 50 rows — download for the full list.
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="flex flex-col gap-3 sm:flex-row">
+            <Button
+              size="lg"
+              className="flex-1 bg-gradient-brand text-primary-foreground hover:opacity-95"
+              onClick={() => downloadXlsx(item.result!, baseName(item.file.name))}
+              disabled={item.result.transactions.length === 0}
+            >
+              <Download className="mr-2 h-4 w-4" /> Download Excel
+            </Button>
+            <Button
+              size="lg"
+              variant="outline"
+              className="flex-1"
+              onClick={() => downloadCsv(item.result!, baseName(item.file.name))}
+              disabled={item.result.transactions.length === 0}
+            >
+              <Download className="mr-2 h-4 w-4" /> Download CSV
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
