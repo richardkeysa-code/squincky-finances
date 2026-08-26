@@ -1,6 +1,6 @@
 import { Link } from "@tanstack/react-router";
 import { useState } from "react";
-import { LogOut, User as UserIcon } from "lucide-react";
+import { GitCompareArrows, LogOut, User as UserIcon } from "lucide-react";
 import logo from "@/assets/squincky-logo.jpeg";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/lib/use-auth";
@@ -26,6 +26,9 @@ export function Header() {
           <span className="text-lg font-bold tracking-tight text-foreground">Squincky</span>
         </Link>
         <nav className="flex items-center gap-2">
+          <Button asChild variant="ghost" size="sm" className="hidden sm:inline-flex">
+            <Link to="/reconcile"><GitCompareArrows className="mr-2 h-4 w-4" /> Reconcile</Link>
+          </Button>
           {loading ? (
             <div className="h-9 w-24 animate-pulse rounded-md bg-muted" />
           ) : user ? (
@@ -41,6 +44,9 @@ export function Header() {
               <DropdownMenuContent align="end" className="w-56">
                 <DropdownMenuLabel className="truncate">{user.email}</DropdownMenuLabel>
                 <DropdownMenuSeparator />
+                <DropdownMenuItem asChild>
+                  <Link to="/reconcile"><GitCompareArrows className="mr-2 h-4 w-4" /> Reconciliation</Link>
+                </DropdownMenuItem>
                 <DropdownMenuItem asChild>
                   <Link to="/history"><UserIcon className="mr-2 h-4 w-4" /> My conversions</Link>
                 </DropdownMenuItem>
