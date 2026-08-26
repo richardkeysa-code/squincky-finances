@@ -107,6 +107,9 @@ export const extractDocument = createServerFn({ method: "POST" })
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "AI request failed";
+      if (msg.toLowerCase().includes("quota") || msg.toLowerCase().includes("billing details")) {
+        throw new Error("OpenAI API quota is unavailable. Add billing or credits to the OpenAI project, then try again.");
+      }
       if (msg.includes("429")) throw new Error("Too many requests right now. Please try again in a moment.");
       if (msg.includes("402")) throw new Error("AI credits exhausted. Contact the workspace owner to add credits.");
       throw new Error(msg);
