@@ -1,0 +1,76 @@
+name: Temporary reconciliation preview
+
+on:
+  push:
+    branches:
+      - feature/reconciliation-mvp
+    paths:
+      - '.github/workflows/temporary-preview.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install --package-lock=false --no-audit --no-fund
+
+      - name: Start application
+        run: |
+          npm run dev -- --host 0.0.0.0 > /tmp/squincky-app.log 2>&1 &
+          echo $! > /tmp/squincky-app.pid
+          for i in {1..60}; do
+            if curl -fsS http://127.0.0.1:8080/reconcile >/dev/null 2>&1; then
+              echo "App is ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "App failed to start"
+          tail -100 /tmp/squincky-app.log
+          exit 1
+
+      - name: Install Cloudflare tunnel
+        run: |
+          curl -fsSL -o /tmp/cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i /tmp/cloudflared.deb
+
+      - name: Open temporary preview
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cloudflared tunnel --url http://127.0.0.1:8080 --no-autoupdate > /tmp/cloudflared.log 2>&1 &
+          echo $! > /tmp/cloudflared.pid
+          for i in {1..30}; do
+            URL=$(grep -Eo 'https://[-a-z0-9]+\.trycloudflare\.com' /tmp/cloudflared.log | head -1 || true)
+            if [ -n "$URL" ]; then
+              FULL_URL="$URL/reconcile"
+              echo "PREVIEW_URL=$URL" >> "$GITHUB_ENV"
+              echo "### Temporary Squincky preview" >> "$GITHUB_STEP_SUMMARY"
+              echo "$FULL_URL" >> "$GITHUB_STEP_SUMMARY"
+              echo "Preview URL: $FULL_URL"
+              gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/1/comments" -f body="Temporary sandbox preview: ${FULL_URL}\n\nThis preview is ephemeral and will shut down automatically when the workflow ends."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Tunnel URL was not created"
+          tail -100 /tmp/cloudflared.log
+          exit 1
+
+      - name: Keep preview alive
+        run: |
+          echo "Preview available at $PREVIEW_URL/reconcile"
+          sleep 1500
