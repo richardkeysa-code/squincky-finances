@@ -1,0 +1,71 @@
+name: Temporary reconciliation preview
+
+on:
+  push:
+    branches:
+      - feature/reconciliation-mvp
+    paths:
+      - '.github/workflows/temporary-preview.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Start application
+        run: |
+          npm run dev -- --host 0.0.0.0 > /tmp/squincky-app.log 2>&1 &
+          echo $! > /tmp/squincky-app.pid
+          for i in {1..60}; do
+            if curl -fsS http://127.0.0.1:5173/reconcile >/dev/null 2>&1; then
+              echo "App is ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "App failed to start"
+          tail -100 /tmp/squincky-app.log
+          exit 1
+
+      - name: Install Cloudflare tunnel
+        run: |
+          curl -fsSL -o /tmp/cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i /tmp/cloudflared.deb
+
+      - name: Open temporary preview
+        run: |
+          cloudflared tunnel --url http://127.0.0.1:5173 --no-autoupdate > /tmp/cloudflared.log 2>&1 &
+          echo $! > /tmp/cloudflared.pid
+          for i in {1..30}; do
+            URL=$(grep -Eo 'https://[-a-z0-9]+\.trycloudflare\.com' /tmp/cloudflared.log | head -1 || true)
+            if [ -n "$URL" ]; then
+              echo "PREVIEW_URL=$URL" >> "$GITHUB_ENV"
+              echo "### Temporary Squincky preview" >> "$GITHUB_STEP_SUMMARY"
+              echo "$URL/reconcile" >> "$GITHUB_STEP_SUMMARY"
+              echo "Preview URL: $URL/reconcile"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Tunnel URL was not created"
+          tail -100 /tmp/cloudflared.log
+          exit 1
+
+      - name: Keep preview alive
+        run: |
+          echo "Preview available at $PREVIEW_URL/reconcile"
+          sleep 3300
