@@ -30,7 +30,7 @@ jobs:
           npm run dev -- --host 0.0.0.0 > /tmp/squincky-app.log 2>&1 &
           echo $! > /tmp/squincky-app.pid
           for i in {1..60}; do
-            if curl -fsS http://127.0.0.1:5173/reconcile >/dev/null 2>&1; then
+            if curl -fsS http://127.0.0.1:8080/reconcile >/dev/null 2>&1; then
               echo "App is ready"
               exit 0
             fi
@@ -47,7 +47,7 @@ jobs:
 
       - name: Open temporary preview
         run: |
-          cloudflared tunnel --url http://127.0.0.1:5173 --no-autoupdate > /tmp/cloudflared.log 2>&1 &
+          cloudflared tunnel --url http://127.0.0.1:8080 --no-autoupdate > /tmp/cloudflared.log 2>&1 &
           echo $! > /tmp/cloudflared.pid
           for i in {1..30}; do
             URL=$(grep -Eo 'https://[-a-z0-9]+\.trycloudflare\.com' /tmp/cloudflared.log | head -1 || true)
