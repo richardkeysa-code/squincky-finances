@@ -1,5 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
-import { generateText } from "ai";
+import { generateText, Output } from "ai";
 import { z } from "zod";
 
 const InputSchema = z.object({
@@ -22,6 +22,21 @@ export type ExtractResult = {
   currency: string;
   transactions: Transaction[];
 };
+
+const ExtractResultSchema = z.object({
+  documentType: z.enum(["invoice", "receipt", "bank_statement", "other"]),
+  currency: z.string(),
+  transactions: z.array(
+    z.object({
+      date: z.string(),
+      amount: z.number(),
+      type: z.enum(["credit", "debit"]),
+      merchant: z.string(),
+      category: z.string(),
+      description: z.string(),
+    }),
+  ),
+});
 
 const SUPPORTED_IMAGE = new Set(["image/jpeg", "image/jpg", "image/png", "image/webp", "image/heic", "image/heif"]);
 const SUPPORTED_DOC = new Set(["application/pdf"]);
@@ -56,7 +71,7 @@ Rules:
 export const extractDocument = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => InputSchema.parse(data))
   .handler(async ({ data }): Promise<ExtractResult> => {
-    const apiKey = process.env.LOVABLE_API_KEY;
+    const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) throw new Error("AI service is not configured.");
 
     const mime = data.mimeType.toLowerCase();
@@ -64,9 +79,9 @@ export const extractDocument = createServerFn({ method: "POST" })
       throw new Error(`Unsupported file type: ${mime}. Please upload a PDF or image (JPG, PNG, HEIC).`);
     }
 
-    const { createLovableAiGateway } = await import("./ai-gateway.server");
-    const gateway = createLovableAiGateway(apiKey);
-    const model = gateway("google/gemini-2.5-flash");
+    const { createOpenAiProvider } = await import("./ai-gateway.server");
+    const openai = createOpenAiProvider(apiKey);
+    const model = openai("gpt-5.4-mini");
 
     const dataUrl = `data:${mime};base64,${data.dataBase64}`;
     const userContent = SUPPORTED_IMAGE.has(mime)
@@ -76,7 +91,7 @@ export const extractDocument = createServerFn({ method: "POST" })
         ]
       : [
           { type: "text" as const, text: "Extract every transaction from this document as JSON." },
-          { type: "file" as const, data: dataUrl, mediaType: mime },
+          { type: "file" as const, data: dataUrl, mediaType: mime, filename: data.fileName },
         ];
 
     let result;
@@ -85,8 +100,9 @@ export const extractDocument = createServerFn({ method: "POST" })
         model,
         system: SYSTEM_PROMPT,
         messages: [{ role: "user", content: userContent }],
+        output: Output.object({ schema: ExtractResultSchema }),
         providerOptions: {
-          lovable: { response_format: { type: "json_object" } },
+          openai: { store: false, reasoningEffort: "low" },
         },
       });
     } catch (err) {
@@ -96,18 +112,7 @@ export const extractDocument = createServerFn({ method: "POST" })
       throw new Error(msg);
     }
 
-    const text = result.text.trim();
-    const jsonStart = text.indexOf("{");
-    const jsonEnd = text.lastIndexOf("}");
-    if (jsonStart === -1 || jsonEnd === -1) {
-      throw new Error("Could not read transactions from this document. Try a clearer copy.");
-    }
-    let parsed: ExtractResult;
-    try {
-      parsed = JSON.parse(text.slice(jsonStart, jsonEnd + 1));
-    } catch {
-      throw new Error("Could not parse the extracted data. Try a clearer copy.");
-    }
+    const parsed = result.output;
 
     const cleaned: ExtractResult = {
       documentType: String(parsed.documentType ?? "other"),
