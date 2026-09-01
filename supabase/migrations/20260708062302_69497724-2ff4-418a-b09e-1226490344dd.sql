@@ -1,1 +1,0 @@
-DROP FUNCTION IF EXISTS public.today_conversion_count(UUID);
