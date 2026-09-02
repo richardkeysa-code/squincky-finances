@@ -1,4 +1,5 @@
 import type { ParsedStatement, ReconciliationResult, Transaction } from "./types";
+import type { StatementReport } from "./reporting";
 
 function transactionRow(transaction: Transaction) {
   return {
@@ -70,4 +71,44 @@ export async function exportReconciliation(result: ReconciliationResult, left: P
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(result.unmatchedLeft.map(transactionRow)), "Unmatched left");
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(result.unmatchedRight.map(transactionRow)), "Unmatched right");
   XLSX.writeFile(workbook, `squincky-reconciliation-${new Date().toISOString().slice(0, 10)}.xlsx`);
+}
+
+export async function exportSpendingReport(report: StatementReport, statement: ParsedStatement) {
+  const XLSX = await import("xlsx");
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(report.entries.map((entry) => ({
+    Date: entry.date,
+    Description: entry.description,
+    Merchant: entry.merchant,
+    Category: entry.category,
+    Flow: entry.flow,
+    Expense: entry.flow === "expense" ? entry.amount : "",
+    Inflow: entry.flow === "inflow" ? entry.amount : "",
+    Currency: entry.currency ?? "",
+  }))), "Breakdown");
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(report.categories.map((category) => ({
+    Category: category.name,
+    "Total expense": category.amount,
+    Transactions: category.count,
+    "Share of expenses": category.share,
+  }))), "Categories");
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(report.merchants.map((merchant) => ({
+    Merchant: merchant.name,
+    Category: merchant.category ?? "",
+    "Total expense": merchant.amount,
+    Transactions: merchant.count,
+    "Share of expenses": merchant.share,
+  }))), "Merchants");
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet([{
+    File: statement.fileName,
+    Bank: statement.bank.name,
+    "Total expenses": report.totalExpense,
+    "Total inflows": report.totalInflow,
+    "Net flow": report.netFlow,
+    "Largest merchant": report.topMerchant?.name ?? "",
+    "Largest merchant spend": report.topMerchant?.amount ?? "",
+    "Largest category": report.topCategory?.name ?? "",
+    "Largest category spend": report.topCategory?.amount ?? "",
+  }]), "Summary");
+  XLSX.writeFile(workbook, `${statement.fileName.replace(/\.[^.]+$/, "")}-report.xlsx`);
 }

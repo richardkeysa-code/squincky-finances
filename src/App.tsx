@@ -1,12 +1,15 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import {
-  ArrowRightLeft, Check, CheckCircle2, ChevronDown, CircleAlert, Download, FileSearch, FileSpreadsheet,
-  FileText, Globe2, Info, LockKeyhole, Plus, RefreshCw, ShieldCheck, Sparkles, Trash2, UploadCloud, X,
+  ArrowRightLeft, BarChart3, Check, CheckCircle2, ChevronDown, CircleAlert, Download, FileSearch, FileSpreadsheet,
+  FileText, Globe2, Info, LockKeyhole, Plus, RefreshCw, Search, ShieldCheck, Sparkles, Store, Tags,
+  TrendingDown, TrendingUp, UploadCloud, WalletCards, X,
 } from "lucide-react";
 import { BANK_PROFILES } from "./lib/bankProfiles";
-import { exportReconciliation, exportStatementCsv, exportStatementXlsx } from "./lib/export";
+import { exportReconciliation, exportSpendingReport, exportStatementCsv, exportStatementXlsx } from "./lib/export";
 import { DEFAULT_MATCH_CONFIG, reconcile } from "./lib/reconciliation";
+import { buildStatementReport, inferExpensePolarity, REPORT_CATEGORIES } from "./lib/reporting";
 import { parseStatement, remapStatement, validateBalances } from "./lib/statementParser";
+import type { ExpensePolarity, ReportOverride, TransactionFlow } from "./lib/reporting";
 import type { ColumnRole, DateOrder, MatchConfig, ParsedStatement, ReconciliationResult, Transaction } from "./lib/types";
 
 const COLUMN_ROLES: Array<{ value: ColumnRole; label: string }> = [
@@ -22,7 +25,7 @@ const COLUMN_ROLES: Array<{ value: ColumnRole; label: string }> = [
   { value: "currency", label: "Currency" },
 ];
 
-type ActiveView = "review" | "reconcile" | "coverage";
+type ActiveView = "reports" | "review" | "reconcile" | "coverage";
 
 function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
@@ -43,16 +46,20 @@ function regionCoverage() {
 export default function App() {
   const [statements, setStatements] = useState<ParsedStatement[]>([]);
   const [activeId, setActiveId] = useState<string>("");
-  const [view, setView] = useState<ActiveView>("review");
+  const [reportId, setReportId] = useState<string>("");
+  const [view, setView] = useState<ActiveView>("reports");
   const [processing, setProcessing] = useState<string[]>([]);
   const [errors, setErrors] = useState<Array<{ file: string; message: string }>>([]);
   const [dragging, setDragging] = useState(false);
   const [leftId, setLeftId] = useState("");
   const [rightId, setRightId] = useState("");
   const [matchConfig, setMatchConfig] = useState<MatchConfig>(DEFAULT_MATCH_CONFIG);
+  const [reportOverrides, setReportOverrides] = useState<Record<string, ReportOverride>>({});
+  const [reportPolarities, setReportPolarities] = useState<Record<string, ExpensePolarity>>({});
   const inputRef = useRef<HTMLInputElement>(null);
 
   const active = statements.find((statement) => statement.id === activeId) ?? statements[0];
+  const reportStatement = statements.find((statement) => statement.id === reportId) ?? statements[0];
   const left = statements.find((statement) => statement.id === leftId) ?? statements[0];
   const right = statements.find((statement) => statement.id === rightId) ?? statements[1];
   const reconciliation: ReconciliationResult | null = useMemo(
@@ -60,7 +67,7 @@ export default function App() {
     [left, right, matchConfig],
   );
 
-  const handleFiles = useCallback(async (incoming: FileList | File[]) => {
+  const handleFiles = useCallback(async (incoming: FileList | File[], destination: "reports" | "review" = view === "reports" ? "reports" : "review") => {
     const files = Array.from(incoming);
     setErrors((current) => current.filter((error) => !files.some((file) => file.name === error.file)));
     for (const file of files) {
@@ -74,14 +81,18 @@ export default function App() {
           return next;
         });
         setActiveId(statement.id);
-        setView("review");
+        setReportId(statement.id);
+        setReportPolarities((current) => current[statement.id]
+          ? current
+          : { ...current, [statement.id]: inferExpensePolarity(statement) });
+        setView(destination);
       } catch (error) {
         setErrors((current) => [...current, { file: file.name, message: error instanceof Error ? error.message : "The file could not be parsed." }]);
       } finally {
         setProcessing((current) => current.filter((name) => name !== file.name));
       }
     }
-  }, [leftId, rightId]);
+  }, [leftId, rightId, view]);
 
   const updateStatement = (updated: ParsedStatement) => {
     setStatements((current) => current.map((statement) => statement.id === updated.id ? updated : statement));
@@ -118,6 +129,7 @@ export default function App() {
     const next = statements.filter((statement) => statement.id !== id);
     setStatements(next);
     setActiveId(next[0]?.id ?? "");
+    setReportId((current) => current === id ? next[0]?.id ?? "" : current);
     setLeftId((current) => current === id ? next[0]?.id ?? "" : current);
     setRightId((current) => current === id ? next.find((item) => item.id !== (leftId || next[0]?.id))?.id ?? "" : current);
     if (next.length < 2 && view === "reconcile") setView("review");
@@ -126,11 +138,12 @@ export default function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <button className="brand" onClick={() => { setView("review"); window.scrollTo({ top: 0, behavior: "smooth" }); }}>
+        <button className="brand" onClick={() => { setView("reports"); window.scrollTo({ top: 0, behavior: "smooth" }); }}>
           <span className="brand-mark">S</span>
           <span>Squincky</span>
         </button>
         <nav className="topnav" aria-label="Primary navigation">
+          <button className={view === "reports" ? "active" : ""} onClick={() => setView("reports")}>Reports</button>
           {statements.length > 0 && <button className={view === "review" ? "active" : ""} onClick={() => setView("review")}>Statements</button>}
           {statements.length > 1 && <button className={view === "reconcile" ? "active" : ""} onClick={() => setView("reconcile")}>Reconcile</button>}
           <button className={view === "coverage" ? "active" : ""} onClick={() => setView("coverage")}>Coverage</button>
@@ -139,7 +152,25 @@ export default function App() {
         <input ref={inputRef} hidden type="file" multiple accept=".pdf,.xlsx,.csv,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" onChange={(event) => event.target.files && handleFiles(event.target.files)} />
       </header>
 
-      {view === "coverage" ? <Coverage onClose={() => setView("review")} /> : statements.length === 0 ? (
+      {view === "coverage" ? <Coverage onClose={() => setView("reports")} /> : view === "reports" ? (
+        <ReportsView
+          statements={statements}
+          statement={reportStatement}
+          reportId={reportId}
+          setReportId={setReportId}
+          overrides={reportOverrides}
+          onOverride={(id, override) => setReportOverrides((current) => ({
+            ...current,
+            [id]: { ...current[id], ...override },
+          }))}
+          polarity={reportStatement ? reportPolarities[reportStatement.id] ?? inferExpensePolarity(reportStatement) : "negative-expense"}
+          setPolarity={(polarity) => reportStatement && setReportPolarities((current) => ({ ...current, [reportStatement.id]: polarity }))}
+          processing={processing}
+          errors={errors}
+          onFiles={(files) => handleFiles(files, "reports")}
+          onChoose={() => inputRef.current?.click()}
+        />
+      ) : statements.length === 0 ? (
         <Landing
           processing={processing}
           errors={errors}
@@ -242,6 +273,136 @@ function UploadZone({ dragging, setDragging, onFiles, onChoose, compact = false 
     <div><h2>{compact ? "Add another statement" : "Drop statements here"}</h2><p>PDF, XLSX, or CSV · up to 25 MB each · multiple files supported</p></div>
     {!compact && <button className="button button-dark" type="button">Browse files</button>}
   </section>;
+}
+
+function ReportsView({ statements, statement, reportId, setReportId, overrides, onOverride, polarity, setPolarity, processing, errors, onFiles, onChoose }: {
+  statements: ParsedStatement[];
+  statement?: ParsedStatement;
+  reportId: string;
+  setReportId: (id: string) => void;
+  overrides: Record<string, ReportOverride>;
+  onOverride: (id: string, override: ReportOverride) => void;
+  polarity: ExpensePolarity;
+  setPolarity: (polarity: ExpensePolarity) => void;
+  processing: string[];
+  errors: Array<{ file: string; message: string }>;
+  onFiles: (files: FileList | File[]) => void;
+  onChoose: () => void;
+}) {
+  const [dragging, setDragging] = useState(false);
+  const [flowFilter, setFlowFilter] = useState<"all" | TransactionFlow>("all");
+  const [search, setSearch] = useState("");
+  const report = useMemo(
+    () => statement ? buildStatementReport(statement, polarity, overrides) : null,
+    [statement, polarity, overrides],
+  );
+
+  if (!statement || !report) {
+    return <main className="landing reports-landing">
+      <section className="hero report-hero">
+        <div className="eyebrow"><BarChart3 size={15} /> Personal spending intelligence</div>
+        <h1>See where your money<br /><span>actually went.</span></h1>
+        <p>Upload a bank or credit-card statement to separate expenses from inflows, consolidate merchants, and rank your spending by category. Everything is calculated privately in your browser.</p>
+        <div className="hero-actions"><button className="button button-primary" onClick={onChoose}><UploadCloud size={19} /> Build a report</button></div>
+        <div className="trust-row"><span><Check size={14} /> Merchant grouping</span><span><Check size={14} /> Editable categories</span><span><Check size={14} /> No transaction uploads</span></div>
+      </section>
+      <UploadZone dragging={dragging} setDragging={setDragging} onFiles={onFiles} onChoose={onChoose} />
+      {(processing.length > 0 || errors.length > 0) && <div className="status-stack">
+        {processing.map((file) => <div className="notice loading" key={file}><RefreshCw className="spin" size={18} /><div><strong>Building report for {file}</strong><span>Normalizing merchants and cash flow locally…</span></div></div>)}
+        {errors.map((error) => <div className="notice error" key={`${error.file}-${error.message}`}><CircleAlert size={18} /><div><strong>{error.file}</strong><span>{error.message}</span></div></div>)}
+      </div>}
+      <section className="feature-grid report-features">
+        <article><Store /><h3>Merchant intelligence</h3><p>Consolidates statement labels such as GRAB*CAR and GRABBIKE into a useful merchant total.</p></article>
+        <article><Tags /><h3>Spending categories</h3><p>Classifies transport, dining, groceries, utilities, travel, shopping, and more—with manual correction.</p></article>
+        <article><TrendingDown /><h3>Expense ranking</h3><p>Surfaces the merchant and category responsible for the largest share of total spending.</p></article>
+      </section>
+    </main>;
+  }
+
+  const currency = report.entries.find((entry) => entry.currency)?.currency;
+  const normalizedSearch = search.trim().toLowerCase();
+  const visibleEntries = report.entries.filter((entry) => {
+    if (flowFilter !== "all" && entry.flow !== flowFilter) return false;
+    if (!normalizedSearch) return true;
+    return `${entry.description} ${entry.merchant} ${entry.category}`.toLowerCase().includes(normalizedSearch);
+  });
+
+  return <main className="workspace report-workspace">
+    <div className="workspace-heading report-heading">
+      <div><div className="eyebrow neutral"><BarChart3 size={15} /> Expense and inflow report</div><h1>Where your money went</h1><p>Merchant totals and categories are inferred locally from the normalized statement. Correct any label below and every summary recalculates immediately.</p></div>
+      <div className="heading-actions"><button className="button button-primary" onClick={() => exportSpendingReport(report, statement)}><Download size={17} /> Export report</button></div>
+    </div>
+
+    <section className="report-source-bar">
+      <label><span>Reporting file</span><select value={reportId || statement.id} onChange={(event) => setReportId(event.target.value)}>{statements.map((item) => <option key={item.id} value={item.id}>{item.fileName}</option>)}</select></label>
+      <div className="report-source-meta"><WalletCards size={18} /><div><strong>{statement.bank.name}</strong><span>{statement.transactions.length} normalized transactions · {statement.format.toUpperCase()}</span></div></div>
+      <label className="polarity-control"><span>Statement convention</span><select value={polarity} onChange={(event) => setPolarity(event.target.value as ExpensePolarity)}><option value="negative-expense">Negative amounts are expenses</option><option value="positive-expense">Positive amounts are expenses (credit card)</option></select></label>
+    </section>
+
+    {(statement.warnings.length > 0 || errors.length > 0) && <div className="status-stack narrow">
+      {statement.warnings.map((warning) => <div className="notice warning" key={warning}><CircleAlert size={18} /><span>{warning}</span></div>)}
+      {errors.map((error) => <div className="notice error" key={`${error.file}-${error.message}`}><CircleAlert size={18} /><div><strong>{error.file}</strong><span>{error.message}</span></div></div>)}
+    </div>}
+
+    <section className="metric-grid report-metrics">
+      <div className="expense-metric"><span><TrendingDown size={14} /> Total expenses</span><strong>{formatMoney(report.totalExpense, currency)}</strong><small>{report.expenseCount} outgoing transactions</small></div>
+      <div className="inflow-metric"><span><TrendingUp size={14} /> Total inflows</span><strong>{formatMoney(report.totalInflow, currency)}</strong><small>{report.inflowCount} incoming transactions</small></div>
+      <div><span>Net cash flow</span><strong className={report.netFlow < 0 ? "negative-value" : "positive-value"}>{formatMoney(report.netFlow, currency)}</strong><small>Inflows minus expenses</small></div>
+      <div><span>Analyzed entries</span><strong>{report.entries.length}</strong><small>{statement.fileName}</small></div>
+    </section>
+
+    <section className="report-insights">
+      <article className="insight-card merchant-insight">
+        <div className="insight-icon"><Store /></div>
+        <div><span>Greatest total expense by merchant</span><h2>{report.topMerchant?.name ?? "No expenses found"}</h2><p>{report.topMerchant ? `${report.topMerchant.count} transaction${report.topMerchant.count === 1 ? "" : "s"} · ${report.topMerchant.category}` : "Upload expense transactions to see this insight."}</p></div>
+        {report.topMerchant && <div className="insight-value"><strong>{formatMoney(report.topMerchant.amount, currency)}</strong><span>{(report.topMerchant.share * 100).toFixed(1)}% of expenses</span></div>}
+      </article>
+      <article className="insight-card category-insight">
+        <div className="insight-icon"><Tags /></div>
+        <div><span>Largest spending category</span><h2>{report.topCategory?.name ?? "No category yet"}</h2><p>{report.topCategory ? `${report.topCategory.count} expense transaction${report.topCategory.count === 1 ? "" : "s"}` : "Categories appear as expenses are detected."}</p></div>
+        {report.topCategory && <div className="insight-value"><strong>{formatMoney(report.topCategory.amount, currency)}</strong><span>{(report.topCategory.share * 100).toFixed(1)}% of expenses</span></div>}
+      </article>
+    </section>
+
+    <section className="report-breakdowns">
+      <article className="breakdown-card">
+        <div className="breakdown-heading"><div><h3>Expenses by category</h3><p>Share of total outgoing spend</p></div><Tags size={18} /></div>
+        <div className="bar-list">{report.categories.slice(0, 8).map((category) => <div className="bar-row" key={category.name}>
+          <div><strong>{category.name}</strong><span>{formatMoney(category.amount, currency)} · {category.count} tx</span></div>
+          <div className="bar-track"><span style={{ width: `${Math.max(2, category.share * 100)}%` }} /></div>
+          <small>{(category.share * 100).toFixed(1)}%</small>
+        </div>)}{report.categories.length === 0 && <EmptyResult text="No expense categories were detected for this file." />}</div>
+      </article>
+      <article className="breakdown-card">
+        <div className="breakdown-heading"><div><h3>Top merchants</h3><p>Consolidated across repeated transactions</p></div><Store size={18} /></div>
+        <div className="merchant-ranking">{report.merchants.slice(0, 8).map((merchant, index) => <div key={merchant.name}>
+          <span className="rank">{index + 1}</span><div><strong>{merchant.name}</strong><small>{merchant.category} · {merchant.count} tx</small></div><b>{formatMoney(merchant.amount, currency)}</b>
+        </div>)}{report.merchants.length === 0 && <EmptyResult text="No outgoing merchants were detected for this file." />}</div>
+      </article>
+    </section>
+
+    <section className="table-card report-table-card">
+      <div className="table-title report-table-title"><div><h3>Transaction allocation</h3><p>Review or edit the inferred merchant, category, and expense/inflow direction.</p></div><span>{visibleEntries.length} of {report.entries.length} entries</span></div>
+      <div className="report-filters">
+        <div className="result-tabs"><button className={flowFilter === "all" ? "active" : ""} onClick={() => setFlowFilter("all")}>All <span>{report.entries.length}</span></button><button className={flowFilter === "expense" ? "active" : ""} onClick={() => setFlowFilter("expense")}>Expenses <span>{report.expenseCount}</span></button><button className={flowFilter === "inflow" ? "active" : ""} onClick={() => setFlowFilter("inflow")}>Inflows <span>{report.inflowCount}</span></button></div>
+        <label className="report-search"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search merchant or description" aria-label="Search report entries" /></label>
+      </div>
+      <div className="table-scroll"><table className="report-table"><thead><tr><th>Date</th><th>Original description</th><th>Merchant</th><th>Category</th><th>Direction</th><th className="number">Expense</th><th className="number">Inflow</th></tr></thead><tbody>
+        {visibleEntries.map((entry) => <tr key={entry.id}>
+          <td className="report-date">{entry.date}</td>
+          <td className="report-description" title={entry.description}>{entry.description}</td>
+          <td><input className="report-merchant-input" value={entry.merchant} onChange={(event) => onOverride(entry.id, { merchant: event.target.value })} aria-label={`Merchant for ${entry.description}`} /></td>
+          <td><select value={entry.category} onChange={(event) => onOverride(entry.id, { category: event.target.value as typeof REPORT_CATEGORIES[number] })} aria-label={`Category for ${entry.description}`}>{REPORT_CATEGORIES.map((category) => <option key={category} value={category}>{category}</option>)}</select></td>
+          <td><select className={`flow-select ${entry.flow}`} value={entry.flow} onChange={(event) => onOverride(entry.id, { flow: event.target.value as TransactionFlow })} aria-label={`Direction for ${entry.description}`}><option value="expense">Expense</option><option value="inflow">Inflow</option></select></td>
+          <td className="number expense-value">{entry.flow === "expense" ? formatMoney(entry.amount, entry.currency || currency) : "—"}</td>
+          <td className="number inflow-value">{entry.flow === "inflow" ? formatMoney(entry.amount, entry.currency || currency) : "—"}</td>
+        </tr>)}
+      </tbody></table>{visibleEntries.length === 0 && <EmptyResult text="No transactions match the current report filters." />}</div>
+    </section>
+
+    {processing.map((file) => <div className="notice loading report-processing" key={file}><RefreshCw className="spin" size={18} /><span>Building report for {file} locally…</span></div>)}
+    <UploadZone dragging={dragging} setDragging={setDragging} onFiles={onFiles} onChoose={onChoose} compact />
+  </main>;
 }
 
 function ReviewView({ statements, active, activeId, setActiveId, removeStatement, updateMapping, updateDateOrder, updateTransaction, processing, errors, onFiles }: {
